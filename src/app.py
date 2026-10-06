@@ -1710,6 +1710,15 @@ def note_write_signed(request: Request) -> Response:
     denied = _burn_nonce(key, nonce)
     if denied:
         return denied
+    # Re-check ownership after _burn_nonce. A concurrent ownership transfer can
+    # change the owner between the gate check above and the write below: without
+    # this second check the stale signer's write would overwrite the transfer.
+    # A fully atomic fix requires the ownership check and note_set to share one
+    # lock; this narrows the TOCTOU window to the nonce-burn-to-write span.
+    if ns == store.OWNERS_NS:
+        denied = _note_write_gate(ns, key, value, signer)
+        if denied:
+            return denied
     meta = store.note_set(config.ROOT, ns, key, value, *condition)
     return respond(
         request,
@@ -1753,6 +1762,12 @@ async def note_post(request: Request) -> Response:
             burned = _burn_nonce(key, nonce)
             if burned:
                 return burned
+            # Same TOCTOU guard as note_write_signed: re-check ownership after
+            # the nonce is burnt so a concurrent transfer cannot be overwritten.
+            if ns == store.OWNERS_NS:
+                denied = _note_write_gate(ns, key, value, signer)
+                if denied:
+                    return denied
         meta = store.note_set(config.ROOT, ns, key, value, *condition)
         return respond(
             request,

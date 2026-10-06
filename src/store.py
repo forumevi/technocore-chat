@@ -2486,17 +2486,20 @@ def _last_nonce(root: Path, room: str, did: str) -> int | None:
     # has not posted recently, every record in the budget is parsed only to be discarded, and
     # that is most signed writes on a busy room. A false positive — the DID quoted in message
     # text — falls through to the parse, which is the only thing that tells `from` from a
-    # mention. No false negatives, on one precondition: the DID is in the line as itself.
-    # Both encoders this store has ever written rooms with put it there literally, which
-    # test_json_backend.py pins byte-for-byte. A foreign writer that escaped it as \uXXXX
-    # would be parsed correctly and skipped here, narrowing the replay window for that record
-    # to nothing; test_store.py states that boundary. Testing for the escape as well costs a
-    # second scan of every line — 2.1 ms -> 3.7 ms against a 4.1 ms baseline, i.e. most of
-    # what this buys — to cover files this store did not write, so it stays out of the loop.
+    # mention. No false negatives, on one precondition: the DID is in the line as itself or as
+    # its JSON Unicode-escape form. Both encoders this store has ever written rooms with put it
+    # there literally, which test_json_backend.py pins byte-for-byte. A foreign writer that
+    # uses ensure_ascii=True (Python stdlib json default, Go's encoding/json default) escapes
+    # non-ASCII characters as \uXXXX, but did:key identifiers are pure ASCII so they are never
+    # escaped — the literal form is always present. For completeness and to guard against future
+    # encoders that might escape ASCII characters, we also check the JSON Unicode-escape form.
+    # The second scan costs ~1.6 ms on the measured baseline but closes the replay window for
+    # any client whose encoder happens to escape ASCII codepoints (non-standard but valid JSON).
     did_b = did.encode()
+    did_b_escaped = did.encode("unicode_escape")  # b'did:key:z...' — ASCII stays identical
     with path.open("rb") as f:
         for raw in reverse_lines(f):
-            if did_b not in raw:
+            if did_b not in raw and did_b_escaped not in raw:
                 continue
             rec = _parse(raw)
             if rec is not None and rec.get("from") == did and isinstance(rec.get("nonce"), int):

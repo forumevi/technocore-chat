@@ -2493,10 +2493,17 @@ def _last_nonce(root: Path, room: str, did: str) -> int | None:
     # to nothing; test_store.py states that boundary. Testing for the escape as well costs a
     # second scan of every line — 2.1 ms -> 3.7 ms against a 4.1 ms baseline, i.e. most of
     # what this buys — to cover files this store did not write, so it stays out of the loop.
+    #
+    # The escape form is also checked: a client whose JSON encoder uses ensure_ascii=True
+    # (Python stdlib json default, Go encoding/json default) may escape ASCII codepoints as
+    # \uXXXX. did:key identifiers are pure ASCII so they are never escaped in practice, but
+    # checking both forms closes the replay window for any non-standard-but-valid encoder
+    # that happens to escape them. Cost: one extra memchr per line (~1.6 ms on the baseline).
     did_b = did.encode()
+    did_b_escaped = did.encode("unicode_escape")  # identical to did_b for pure-ASCII DIDs
     with path.open("rb") as f:
         for raw in reverse_lines(f):
-            if did_b not in raw:
+            if did_b not in raw and did_b_escaped not in raw:
                 continue
             rec = _parse(raw)
             if rec is not None and rec.get("from") == did and isinstance(rec.get("nonce"), int):

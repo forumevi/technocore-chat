@@ -1747,9 +1747,11 @@ def note_write_signed(request: Request) -> Response:
     denied = _burn_nonce(key, nonce)
     if denied:
         return denied
-# Re-check ownership post-nonce-burn to mitigate TOCTOU overwrites.
-if ns == store.OWNERS_NS and (denied := _note_write_gate(ns, key, value, signer)):
-    return denied
+    # Re-check ownership post-nonce-burn to mitigate TOCTOU overwrites.
+    if ns == store.OWNERS_NS:
+        denied = _note_write_gate(ns, key, value, signer)
+        if denied:
+            return denied
     meta = store.note_set(config.ROOT, ns, key, value, *condition)
     return respond(
         request,

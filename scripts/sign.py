@@ -363,17 +363,25 @@ def check_note(root: str, body: str) -> int:
     """
     key, live, now = public_key(root), 0, int(time.time())
     records = delegations(body)
-    current = newest(records)
+    # Verify every record first so that `newest` only ranks records the root actually
+    # signed. Passing all records — forged ones included — lets a stranger append a
+    # high-nonce forgery and displace a real grant as SUPERSEDED (#782).
+    verified: set[int] = set()
     for i, (agent, scope, expires, nonce, sig) in enumerate(records):
         try:
             key.verify(
                 base64.urlsafe_b64decode(sig + "=="),
                 delegation(root, agent, scope, expires, nonce).encode(),
             )
+            verified.add(i)
         except (InvalidSignature, ValueError, TypeError):
-            # Not "invalid": *forged, or for somebody else*. A record that fails here was
-            # signed by a key that is not this root, which in a note anyone can write to is
-            # the ordinary case and not an error.
+            pass
+    current = newest([r for i, r in enumerate(records) if i in verified])
+    # Re-index current into the original records list so the loop below can compare i.
+    verified_list = [i for i in range(len(records)) if i in verified]
+    current = {verified_list[j] for j in current}
+    for i, (agent, scope, expires, nonce, sig) in enumerate(records):
+        if i not in verified:
             print(f"FORGED     {agent} {scope}  (not signed by {root[:20]}...)")
             continue
         # DIGITS_RE and not str.isdigit(): the same trap PR #54 fixed for nonces, in the

@@ -389,6 +389,33 @@ def test_both_sides_spell_the_digit_grammar_the_same_way(page, sign):
     assert "DIGITS_RE.test(d.nonce)" in page
 
 
+def test_a_forged_high_nonce_record_does_not_suppress_a_real_grant(sign, capsys):
+    """A stranger can append a delegation record with a valid signature — signed by their own
+    key, not the root. `newest()` must rank only records the root signed, so a high-nonce
+    forgery cannot displace a real, lower-nonce grant as SUPERSEDED.
+
+    Regression for #782: before the fix, `newest(records)` received all records including
+    forged ones, and an attacker who appended `delegate: <agent> * <expires> 999 <bad-sig>`
+    caused the real record at nonce 5 to be reported SUPERSEDED rather than OK.
+    """
+    root, agent, attacker = _key(ROOT_SEED), _key(AGENT_SEED), _key("33" * 32)
+    agent_did = sign.did_of(agent)
+    # The real grant: low nonce, valid signature by root.
+    real = _line(sign, root, agent_did, scope="*", nonce="5")
+    # A forgery: high nonce — attacker signs with their own key, not root.
+    forged_canonical = sign.delegation(sign.did_of(root), agent_did, "*", str(int(time.time()) + 86400), "999")
+    forged_sig = sign.signature(attacker, forged_canonical)
+    forged = f"{sign.DELEGATE_TOKEN} {agent_did} * {int(time.time()) + 86400} 999 {forged_sig}"
+    note = f"{real} {forged}"
+
+    assert sign.check_note(sign.did_of(root), note) == 1
+    out = capsys.readouterr().out
+    assert "FORGED" in out
+    # Before the fix: the real grant was SUPERSEDED; after: it must be OK.
+    assert any(line.startswith("OK ") and agent_did in line for line in out.splitlines())
+    assert "SUPERSEDED" not in out
+
+
 def test_a_valid_expiry_still_passes_on_both_sides(sign, capsys):
     """The guard rails have to leave the road open: an ordinary ten-digit unix second is
     what every delegation this tooling issues actually carries."""

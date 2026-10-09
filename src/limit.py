@@ -168,7 +168,7 @@ def _dupe_key(room: str, text: str, min_length: int) -> tuple[str, bytes] | None
     was meant to hand back.
     """
     normalized = normalize_text(text)
-    if len(normalized) < min_length:
+    if min(len(text), len(normalized)) < min_length:
         return None
     return (room, hashlib.blake2b(normalized.encode("utf-8"), digest_size=16).digest())
 
@@ -202,11 +202,10 @@ def dupe_refused(
         seen = _dupes.get(key)
         if seen is not None:
             live = tuple(t for t in seen if now - t <= window)
-            if len(live) >= max_copies:
-                _dupes[key] = live[-max_copies:]  # prune, but never extend on a refusal
-                return True
-            _dupes[key] = (live + (now,))[-max_copies:]
+            refused = len(live) >= max_copies
+            _dupes[key] = live[-max_copies:] if refused else (live + (now,))[-max_copies:]
         else:
+            refused = False
             _dupes[key] = (now,)
         _dupes.move_to_end(key)
         # Two bounds, because one is not enough under load: a per-call-capped sweep from
@@ -221,7 +220,7 @@ def dupe_refused(
             del _dupes[oldest]
         while len(_dupes) > cap:
             _dupes.popitem(last=False)
-    return False
+    return refused
 
 
 def dupe_release(room: str, text: str, now: float, window: float, min_length: int = 16) -> None:
@@ -312,8 +311,8 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
             wait = 0.0
         else:
             wait = (1.0 - tokens) * 60.0 / per_min
+        _buckets.pop((ip, kind), None)
         _buckets[(ip, kind)] = (tokens, now)
-        _buckets.move_to_end((ip, kind))
         while len(_buckets) > max_buckets:
             _buckets.popitem(last=False)
     # Counted at the one point every rate-limited route already funnels through, so a new

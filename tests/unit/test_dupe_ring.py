@@ -46,6 +46,78 @@ def refused(
     return limit.dupe_refused(room, text, now, window, min_length, max_copies, cap)
 
 
+def test_a_text_short_in_typed_chars_is_exempt_even_when_nfkc_grows_it() -> None:
+    """NFKC can lengthen a text: U+FDFA (one typed character) decomposes to 18 characters.
+    Before the fix, the floor was measured on the normalised form only, so a one-character
+    message that normalises past the 16-char floor was treated as filterable, and six
+    copies from six different senders produced a 422 whose own recovery advice ("send
+    something under 16 characters") was impossible to follow.
+
+    The fix measures min(typed_len, normalised_len), so any text under the floor in
+    either form is exempt — it must never appear in the ring.
+
+    Regression for #525: U+FDFA decomposes to 18 NFKC chars; four squared units (㎉㎉㎉㎉)
+    decompose to 16. Both must clear the floor as typed, regardless of the normalised form.
+    """
+    limit._dupes.clear()
+    for case in (
+        "\ufdfa",                       # 1 typed char → 18 NFKC chars
+        "\u3300\u3300\u3300\u3300",     # 4 typed chars → 16 NFKC chars (㌀×4 → アパート×4)
+    ):
+        assert len(case) < FLOOR, "premise: typed length is below the floor"
+        assert len(limit.normalize_text(case)) >= FLOOR, (
+            "premise: normalised form clears the floor"
+        )
+        for _ in range(COPIES + 2):
+            assert refused(case, now=0.0) is False, (
+                f"a {len(case)}-char typed text must never be refused as a duplicate"
+            )
+        assert not any(case in str(k) for k in limit._dupes), (
+            "a short-typed text must not even be recorded in the ring"
+        )
+    limit._dupes.clear()
+
+
+def test_a_refused_phrase_stays_at_the_lru_front_and_survives_eviction() -> None:
+    """Before the fix, the refusal branch returned early — before move_to_end and the
+    sweep. An actively-refused flood phrase looked to the LRU ring like a key nobody had
+    touched in a while, so ordinary distinct traffic cycled past it and, once the hard cap
+    filled, the refused phrase was the first thing evicted. The next copy was then accepted
+    as brand-new, handing the flood another max_copies free slots.
+
+    After the fix, both branches share the tail (move_to_end + sweep + hard-cap eviction),
+    so a refused key stays at the most-recently-used end and is the last to be evicted.
+
+    Regression for #358: reproducer from the issue, adapted to this file's helpers.
+    A long window (1000s) is used so no timestamp expires during the test — window expiry
+    is a correct eviction; this tests eviction pressure from cap overflow only.
+    """
+    limit._dupes.clear()
+    cap = 64
+    win = 1000
+    phrase = "buy the token now, huge gains guaranteed, dont miss out"
+
+    # Use a tiny cap so eviction pressure is easy to reason about.
+    tiny_cap = 4
+
+    for i in range(COPIES):           # accept the first COPIES
+        assert refused(phrase, now=float(i), window=win, cap=tiny_cap) is False
+    # Interleave refusals of phrase with distinct filler writes so each refusal moves phrase
+    # to the MRU end, then a new filler arrives.  After tiny_cap refusals of phrase and the
+    # same number of fillers, the ring has tiny_cap keys; phrase's most-recent move_to_end
+    # happened AFTER each filler, so phrase sits at the MRU end — not the LRU victim.
+    for i in range(tiny_cap):
+        assert refused(phrase, now=float(COPIES + i * 2), window=win, cap=tiny_cap) is True
+        refused("filler phrase " + str(i), now=float(COPIES + i * 2 + 1), window=win, cap=tiny_cap)
+    # One more distinct key overflows the cap by 1; the oldest filler is the LRU victim.
+    refused("overflow phrase", now=float(COPIES + tiny_cap * 2 + 1), window=win, cap=tiny_cap)
+    # phrase must still be in the ring and still be refused
+    assert refused(phrase, now=float(COPIES + tiny_cap * 2 + 2), window=win, cap=tiny_cap) is True, (
+        "an actively-refused phrase must not be evicted; it was move_to_end'd after every filler"
+    )
+    limit._dupes.clear()
+
+
 def test_normalisation_folds_case_whitespace_and_unicode_compatibility() -> None:
     """One key per meaning: NFKC first (compatibility forms decompose before casefold),
     then the store's invisible categories to spaces, then casefold, then whitespace

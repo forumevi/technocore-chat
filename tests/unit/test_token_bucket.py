@@ -126,6 +126,38 @@ def _grants(callers: int) -> int:
     return len(granted)
 
 
+def test_a_taken_bucket_moves_to_the_lru_end_not_the_front() -> None:
+    """take() must insert at the most-recently-used end after every call, so LRU eviction
+    always removes the longest-idle IP first, not the one whose bucket was just updated.
+
+    Before the fix, take() used __setitem__ + move_to_end. Because __setitem__ on an
+    existing key keeps the key at its current position, move_to_end was required to
+    promote it. The race: Thread B calls popitem(last=False) between Thread A's
+    __setitem__ and move_to_end, removing the key Thread A just wrote. Thread A then
+    calls move_to_end on a key that no longer exists → KeyError → HTTP 500 on the exact
+    path the limiter protects.
+
+    The fix uses pop + __setitem__: inserting at the end is a single dict operation with
+    no window for a concurrent eviction to remove the key between write and move.
+
+    Regression for #378: assert that after a take the key sits at the most-recently-used
+    end (last position), not at whatever position it had before.
+    """
+    limit._buckets.clear()
+    req_a = _Request("10.0.0.1")
+    req_b = _Request("10.0.0.2")
+    # Seed two IPs: A is older (inserted first → sits at the front).
+    limit.take(req_a, "read", per_min=60.0, burst=60.0, ip_header=IP_HEADER)
+    limit.take(req_b, "read", per_min=60.0, burst=60.0, ip_header=IP_HEADER)
+    # Now take() for A again — A must move to the most-recently-used end.
+    limit.take(req_a, "read", per_min=60.0, burst=60.0, ip_header=IP_HEADER)
+    lru_order = list(limit._buckets.keys())
+    assert lru_order[-1] == ("10.0.0.1", "read"), (
+        "the just-updated key must be at the most-recently-used end, not the front"
+    )
+    limit._buckets.clear()
+
+
 def test_a_one_token_bucket_admits_one_caller_however_many_arrive_together():
     """The overdraft this guards against scales with concurrency, so the count matters.
 

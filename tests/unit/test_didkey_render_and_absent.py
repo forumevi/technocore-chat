@@ -45,3 +45,20 @@ def test_verify_refuses_a_missing_signature_before_decoding():
     for blank in (None, "", "short"):
         with pytest.raises(didkey.DidError):
             didkey.verify(did, blank, "hello")
+def test_nonce_pattern_bounds_the_replay_counter():
+    """NONCE_RE is the gate _signer runs before _burn_nonce's monotonic compare.
+
+    The 19-digit ceiling is the int64 bound: a 20-digit nonce would survive fullmatch
+    and then feed int() a value past the counter's intent, quietly weakening the
+    single-use guarantee the nonce exists to provide. Nothing in the suite pinned the
+    pattern's edges, so a {1,19} -> {1,20} typo would pass every existing test.
+    """
+    # Valid: 1..19 digits, including a bare zero (a counter may start at 0).
+    for ok in ("0", "1", "9", "10", "9999999999999999999"):  # 19 nines
+        assert didkey.NONCE_RE.fullmatch(ok), ok
+
+    # Invalid: empty, whitespace, sign, decimal, hex, letters, and the 20-digit
+    # overflow the ceiling exists to stop.
+    for bad in ("", " ", "-1", "+1", "1.5", "0x1", "abc", "1a",
+                "99999999999999999999"):  # 20 nines
+        assert not didkey.NONCE_RE.fullmatch(bad), bad
